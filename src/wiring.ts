@@ -5,6 +5,12 @@ import { baseModelProviders, configuredModelForHarness, providerKeysPresent, typ
 import type { ServerDeps } from "./api/deps.ts";
 import { createIdentityService, type DeactivationRecord, type IdentityService } from "./identity/identity-service.ts";
 import {
+  createPasswordCredentialStore,
+  type PasswordCredential,
+  type PasswordCredentialStore,
+} from "./auth/password-credentials.ts";
+import type { BreakGlassConfig } from "./auth/break-glass.ts";
+import {
   createMemoryConfigStore,
   type ScopedConfigStore,
   type PersistedSoul,
@@ -353,6 +359,8 @@ export interface BuiltApp {
   credentialUsage: CredentialUsageSink;
   egressAudit: EgressAuditSink;
   identity: IdentityService;
+  passwordCredentials: PasswordCredentialStore;
+  breakGlass: BreakGlassConfig | undefined;
   keychain?: Keychain;
   serviceCreds: ServiceCredentialStore;
   deliveries: DeliveryStore;
@@ -434,6 +442,12 @@ export function buildApp(
     directorySyncProtected: config.emailAuthPrincipals,
   });
   void identity.hydrate();
+  const passwordCredentials = createPasswordCredentialStore(artifactMap<PasswordCredential>("password_credentials"));
+  const breakGlass = config.breakGlass;
+  if (breakGlass)
+    console.warn(
+      `[break-glass] recovery is armed for ${breakGlass.principalId} — POST /v1/auth/break-glass can reset that account's password and admin grant`,
+    );
   const leaderLease: LeaderLease = pgArtifactMap
     ? createPostgresLeaderLease(pgArtifactMap.pool)
     : createNoopLeaderLease();
@@ -1552,6 +1566,8 @@ export function buildApp(
     credentialUsage,
     egressAudit,
     identity,
+    passwordCredentials,
+    breakGlass,
     workspace,
     memory,
     ...(keychain ? { keychain } : {}),
@@ -1641,6 +1657,8 @@ export function serverDeps(
     scheduler: built.scheduler,
     webhookReceiver: built.webhookReceiver,
     identity: built.identity,
+    passwordCredentials: built.passwordCredentials,
+    ...(built.breakGlass ? { breakGlass: built.breakGlass } : {}),
     ...(built.keychain ? { keychain: built.keychain } : {}),
     serviceCreds: built.serviceCreds,
     deliveries: built.deliveries,

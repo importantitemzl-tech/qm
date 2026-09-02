@@ -1,5 +1,5 @@
 import type { PrincipalType } from "../types.ts";
-import { samePerson } from "./person.ts";
+import { personKey, samePerson } from "./person.ts";
 
 export interface DirectoryMember {
   principalId: string;
@@ -43,6 +43,15 @@ export type ChannelResolution =
 
 export interface DirectoryStore {
   replace(members: DirectoryMember[], syncedAt?: number): Promise<boolean>;
+  /**
+   * Record a member this deployment created itself, rather than one observed in
+   * an upstream roster. A locally created member survives `replace`, which is a
+   * whole-roster swap: a deployment whose people are created by an
+   * administrator has no upstream roster to be swapped in, and one that also
+   * syncs from Slack must not lose its local accounts on the next sync.
+   */
+  upsertMember(member: DirectoryMember): Promise<void>;
+  removeMember(principalId: string): Promise<void>;
   replaceChannels(
     channels: DirectoryChannel[],
     channelMembers?: ChannelMembership[],
@@ -101,6 +110,13 @@ function pickMatch<T>(
 
 export function createDirectoryStore(): DirectoryStore {
   let members: DirectoryMember[] = [];
+  let syncedMembers: DirectoryMember[] = [];
+  let localMembers: DirectoryMember[] = [];
+  const mergeMembers = (): void => {
+    const byKey = new Map<string, DirectoryMember>();
+    for (const m of [...syncedMembers, ...localMembers]) byKey.set(personKey(m.principalId), m);
+    members = [...byKey.values()];
+  };
   let channels: DirectoryChannel[] = [];
   let channelMembers: Map<string, Set<string>> | undefined;
   let knownChannelRosters: Set<string> | undefined;
@@ -131,8 +147,19 @@ export function createDirectoryStore(): DirectoryStore {
     },
     async replace(next, syncedAt) {
       if (!acceptSync("members", syncedAt)) return false;
-      members = next.filter((m) => m.principalId && m.type === "internal");
+      syncedMembers = next.filter((m) => m.principalId && m.type === "internal");
+      mergeMembers();
       return true;
+    },
+    async upsertMember(member) {
+      if (!member.principalId || member.type !== "internal") return;
+      localMembers = [...localMembers.filter((m) => !samePerson(m.principalId, member.principalId)), member];
+      mergeMembers();
+    },
+    async removeMember(principalId) {
+      localMembers = localMembers.filter((m) => !samePerson(m.principalId, principalId));
+      syncedMembers = syncedMembers.filter((m) => !samePerson(m.principalId, principalId));
+      mergeMembers();
     },
     async replaceChannels(nextChannels, nextChannelMembers, syncedAt, nextChannelRosterIds, revocations = []) {
       if (!acceptSync("channels", syncedAt)) return false;

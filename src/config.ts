@@ -1,4 +1,5 @@
 import { existsSync, readdirSync } from "node:fs";
+import { readBreakGlassConfig, type BreakGlassConfig } from "./auth/break-glass.ts";
 import { providerBaseUrlsFromEnv, type ProviderBaseUrls } from "./model/provider-endpoints.ts";
 import { join, resolve } from "node:path";
 import {
@@ -61,6 +62,7 @@ export interface Config {
   sessionTapeMode: "shadow" | "serve";
   adminGrants?: string;
   emailAuthPrincipals?: string[];
+  breakGlass?: BreakGlassConfig;
   rateLimitPerWindow: number;
   rateLimitWindowMs: number;
   budgetUsdPerWindow?: number;
@@ -798,6 +800,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(modelProvider ? { modelProvider } : {}),
     providerBaseUrls,
     ...(env.ADMIN_GRANTS ? { adminGrants: env.ADMIN_GRANTS } : {}),
+    ...((): { breakGlass?: BreakGlassConfig } => {
+      const breakGlass = readBreakGlassConfig(env);
+      return breakGlass ? { breakGlass } : {};
+    })(),
     ...(env.AUTH_ALLOWED_EMAILS
       ? {
           emailAuthPrincipals: [
