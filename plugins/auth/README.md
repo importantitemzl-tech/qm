@@ -78,6 +78,11 @@ therefore required rather than optional, and no sender or mail-transport
 credential is needed — the broker is built with a mailer that throws, so
 "nothing is mailed" is a property of the build.
 
+Core must be told to store credentials at all: `QM_PASSWORD_SIGN_IN` is off by
+default, and with it off core creates no credential table and the password,
+account-management and break-glass routes answer `404`. A deployment that signs
+people in by emailed link is therefore unchanged down to its route table.
+
 Accounts are created by an administrator on the Admin surface, which writes to
 core. There is no self-service registration and no self-service reset: with no
 mail channel, a forgotten password is an administrator reset. An account
@@ -91,8 +96,15 @@ applies, and is checked before the password leaves the broker.
 
 A wrong password, an address with no account, a deactivated principal, and a
 rate-limited attempt all answer with the same page and the same sentence. Core
-verifies an unknown identifier against a decoy hash so the two also cost the
-same time.
+verifies an unknown identifier against a decoy hash so a wrong password and an
+unknown address also cost the same time. A rate-limited attempt is faster,
+which reveals only that the caller has exhausted their own bucket: the limiter
+is keyed on the identifier and the client address and behaves identically
+whether or not an account exists.
+
+Deactivation is read from the durable record on this path rather than from the
+replica's identity cache, because `refresh()` is throttled and each replica
+caches separately — an admission decision cannot be up to that interval stale.
 
 The identifier stays an email address. Nothing is sent to it; it is the person
 key the directory, `personKey`, the OIDC subject derivation and `ADMIN_GRANTS`

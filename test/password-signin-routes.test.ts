@@ -10,6 +10,7 @@ import { createInsecureTestServer } from "../src/api/server.ts";
 import { buildApp } from "../src/wiring.ts";
 import { createMemoryReplayDedupe, type ReplayDedupe } from "../src/auth/replay-dedupe.ts";
 import { readBreakGlassConfig } from "../src/auth/break-glass.ts";
+import { createIdentityService } from "../src/identity/identity-service.ts";
 import { testConfig } from "./support/test-config.ts";
 
 const ADMIN = "admin-alice@default-org";
@@ -20,8 +21,13 @@ function durable(): ReplayDedupe {
   return { durable: true, claim: (id, exp) => inner.claim(id, exp) };
 }
 
-function start(opts: { breakGlass?: boolean } = {}) {
-  const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "password-routes-")) }));
+function start(opts: { breakGlass?: boolean; passwordSignIn?: boolean } = {}) {
+  const built = buildApp(
+    testConfig({
+      dataDir: mkdtempSync(join(tmpdir(), "password-routes-")),
+      passwordSignIn: opts.passwordSignIn ?? true,
+    }),
+  );
   const breakGlass = opts.breakGlass
     ? readBreakGlassConfig({
         QM_BREAK_GLASS_PRINCIPAL: "rescue@example.com",
@@ -34,7 +40,7 @@ function start(opts: { breakGlass?: boolean } = {}) {
     auditLog: built.auditLog,
     identity: built.identity,
     directory: built.directory,
-    passwordCredentials: built.passwordCredentials,
+    ...(built.passwordCredentials ? { passwordCredentials: built.passwordCredentials } : {}),
     replayDedupe: durable(),
     ...(breakGlass ? { breakGlass } : {}),
   });
@@ -275,6 +281,89 @@ test("break-glass restores one named principal, and only with the boot secret", 
     assert.ok(audit.some((e) => e.action === "break-glass.recover"));
     assert.ok(audit.some((e) => e.action === "break-glass.refused"));
   } finally {
+    await s.close();
+  }
+});
+
+test("with QM_PASSWORD_SIGN_IN off the routes do not exist and no credential table is created", async () => {
+  const s = start({ passwordSignIn: false, breakGlass: true });
+  try {
+    assert.equal(s.built.passwordCredentials, undefined);
+    assert.equal((await verify(s.base, "ops@example.com", "issued-by-admin")).status, 404);
+    assert.equal((await admin(s.base, "GET", "/v1/admin/accounts")).status, 404);
+    const rescue = await fetch(`${s.base}/v1/auth/break-glass`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${BREAK_GLASS_SECRET}` },
+      body: JSON.stringify({ principalId: "rescue@example.com", password: "recovered-by-hand" }),
+    });
+    assert.equal(rescue.status, 404, "break-glass is meaningless with no credential to reset");
+  } finally {
+    await s.close();
+  }
+});
+
+test("a deactivation on another replica is honoured immediately, not after the refresh interval", async () => {
+  const s = start();
+  try {
+    await admin(s.base, "POST", "/v1/admin/accounts", { principalId: "ops@example.com", password: "issued-by-admin" });
+    // Warm this replica's cache, then deactivate through a second service over
+    // the same durable store — which is what a second core replica is.
+    assert.equal(((await (await verify(s.base, "ops@example.com", "issued-by-admin")).json()) as any).ok, true);
+
+    const other = createIdentityService(s.built.identityStore);
+    await other.deactivate("ops@example.com", "manual");
+
+    // No waiting for REFRESH_TTL_MS: an admission decision reads the record.
+    assert.equal(s.built.identity.classify("ops@example.com").type, "internal", "the cache is indeed still stale");
+    assert.deepEqual(await (await verify(s.base, "ops@example.com", "issued-by-admin")).json(), { ok: false });
+    assert.equal((await s.built.identity.classifyFresh("ops@example.com")).type, "guest");
+  } finally {
+    await s.close();
+  }
+});
+
+test("the attempt limiter behaves the same for an identifier with an account and one without", async () => {
+  const s = start();
+  try {
+    await admin(s.base, "POST", "/v1/admin/accounts", { principalId: "ops@example.com", password: "issued-by-admin" });
+    // Eleven wrong attempts each. The eleventh is refused by the limiter for
+    // both, so being rate-limited says nothing about who has an account.
+    const run = async (identifier: string): Promise<number[]> => {
+      const statuses: number[] = [];
+      for (let i = 0; i < 11; i++) statuses.push((await verify(s.base, identifier, `wrong-${i}`, "10.0.0.9")).status);
+      return statuses;
+    };
+    assert.deepEqual(await run("ops@example.com"), await run("nobody@example.com"));
+  } finally {
+    await s.close();
+  }
+});
+
+test("a break-glass call whose grant fails reports failure rather than success", async () => {
+  const s = start({ breakGlass: true });
+  const admin_ = s.built.admin;
+  const original = admin_.forceGrantOrgAdmin.bind(admin_);
+  admin_.forceGrantOrgAdmin = async () => {
+    throw new Error("grant store is away");
+  };
+  try {
+    const r = await fetch(`${s.base}/v1/auth/break-glass`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${BREAK_GLASS_SECRET}` },
+      body: JSON.stringify({ principalId: "rescue@example.com", password: "recovered-by-hand" }),
+    });
+    assert.equal(r.status, 500);
+    const audit = await s.built.auditLog.events();
+    assert.ok(
+      audit.some((e) => e.action === "break-glass.recover" && e.status === "partial"),
+      "the partial recovery is what the audit log must say",
+    );
+    assert.ok(
+      !audit.some((e) => e.action === "break-glass.recover" && e.status === "ok"),
+      "and it must not also claim success",
+    );
+  } finally {
+    admin_.forceGrantOrgAdmin = original;
     await s.close();
   }
 });

@@ -50,13 +50,12 @@ async function withinLimit(ctx: ApiCtx, kind: string, value: string, limit: numb
   return false;
 }
 
-function credentialsOr503(ctx: ApiCtx): NonNullable<ApiCtx["deps"]["passwordCredentials"]> | null {
+function passwordStoreOr404(ctx: ApiCtx): NonNullable<ApiCtx["deps"]["passwordCredentials"]> | null {
   const store = ctx.deps.passwordCredentials;
   if (!store) {
-    sendJson(ctx.res, 503, {
-      error: "not_configured",
-      message: "password credentials need the Postgres-backed store; set DATABASE_URL",
-    });
+    // The deployment does not do password sign-in. The route does not exist
+    // for it, rather than existing and refusing.
+    sendJson(ctx.res, 404, { error: "not_found" });
     return null;
   }
   if (!ctx.deps.replayDedupe?.durable) {
@@ -74,11 +73,21 @@ function credentialsOr503(ctx: ApiCtx): NonNullable<ApiCtx["deps"]["passwordCred
  * A wrong password, an identifier with no account, a deactivated principal, and
  * a rate-limited attempt all answer the same way. Nothing here reveals who has
  * an account.
+ *
+ * One difference is deliberate and is not a leak. A rate-limited attempt
+ * returns before the hash comparison, so it is measurably faster than a
+ * password that was actually checked. What that timing reveals is whether the
+ * *caller's own* attempts have exhausted a bucket — the limiter is keyed on the
+ * identifier and the client address and behaves identically whether or not an
+ * account exists, which `test/password-signin-routes.test.ts` asserts. Paying
+ * the hash cost on a refused attempt would trade a non-leak for an
+ * amplification vector: it would let an attacker force unbounded scrypt work
+ * precisely when the limiter has decided to stop doing any.
  */
 const refuse = (ctx: ApiCtx): void => sendJson(ctx.res, 200, { ok: false });
 
 async function verifyPassword(ctx: ApiCtx): Promise<void> {
-  const store = credentialsOr503(ctx);
+  const store = passwordStoreOr404(ctx);
   if (!store) return;
   const attempt = readAttempt(ctx.body);
   if (!attempt)
@@ -91,9 +100,17 @@ async function verifyPassword(ctx: ApiCtx): Promise<void> {
   const verdict = await store.verify(attempt.identifier, attempt.password);
   if (!verdict.ok) return refuse(ctx);
 
-  // A deactivated principal has no way in, whatever their password says.
-  await ctx.deps.identity?.refresh();
-  const principal = ctx.deps.identity?.classify(verdict.principalId);
+  // A deactivated principal has no way in, whatever their password says. This
+  // reads the durable record rather than the replica's cache: `refresh()` is
+  // throttled, so a cached answer can be up to `REFRESH_TTL_MS` stale and this
+  // is an admission decision, not a decoration.
+  let principal: { type: string } | undefined;
+  try {
+    principal = await ctx.deps.identity?.classifyFresh(verdict.principalId);
+  } catch (e) {
+    console.error(`[password] deactivation lookup failed: ${String(e)}`);
+    return refuse(ctx);
+  }
   if (principal && principal.type !== "internal") {
     audit(ctx.deps, {
       principalId: verdict.principalId,
@@ -118,7 +135,7 @@ async function verifyPassword(ctx: ApiCtx): Promise<void> {
 }
 
 async function changePassword(ctx: ApiCtx): Promise<void> {
-  const store = credentialsOr503(ctx);
+  const store = passwordStoreOr404(ctx);
   if (!store) return;
   const attempt = readAttempt(ctx.body);
   const b = isObj(ctx.body) ? ctx.body : {};
@@ -132,9 +149,13 @@ async function changePassword(ctx: ApiCtx): Promise<void> {
   if (!(await withinLimit(ctx, "identifier", personKey(attempt.identifier), ATTEMPTS_PER_IDENTIFIER, now)))
     return refuse(ctx);
 
-  await ctx.deps.identity?.refresh();
-  const before = ctx.deps.identity?.classify(attempt.identifier);
-  if (before && before.type !== "internal") return refuse(ctx);
+  try {
+    const before = await ctx.deps.identity?.classifyFresh(attempt.identifier);
+    if (before && before.type !== "internal") return refuse(ctx);
+  } catch (e) {
+    console.error(`[password] deactivation lookup failed: ${String(e)}`);
+    return refuse(ctx);
+  }
 
   const verdict = await store.change(attempt.identifier, attempt.password, next);
   if (!verdict.ok) return refuse(ctx);
@@ -156,11 +177,21 @@ async function breakGlassRecover(ctx: ApiCtx): Promise<void> {
   const { res, deps, req } = ctx;
   const cfg = deps.breakGlass;
   if (!cfg) return sendJson(res, 404, { error: "not_found" });
-  const store = credentialsOr503(ctx);
+  const store = passwordStoreOr404(ctx);
   if (!store) return;
 
   const ip = headerValue(req, "x-qm-client-ip") || req.socket.remoteAddress || "unknown";
   if (!(await withinLimit(ctx, "breakglass-ip", ip, BREAK_GLASS_ATTEMPTS_PER_IP, Date.now()))) {
+    // Audited like any other refusal: repeated attempts against this route are
+    // exactly what an operator would want to see afterwards.
+    audit(deps, {
+      principalId: cfg.principalId,
+      action: "break-glass.refused",
+      resource: cfg.principalId,
+      scopeLabel: orgScope(deps),
+      status: "rate-limited",
+      detail: `from ${ip}`,
+    });
     return sendJson(res, 429, { error: "too_many_attempts" });
   }
 
@@ -190,10 +221,26 @@ async function breakGlassRecover(ctx: ApiCtx): Promise<void> {
   await deps.directory?.upsertMember({ principalId, displayName: principalId, type: "internal" });
   await deps.identity?.reactivate(principalId);
   await store.set(principalId, password, "break-glass", true);
+  // Restoring the grant is the point. Reporting success without it would tell
+  // an operator mid-incident that they can get in when they cannot, so a
+  // failure here is a failed recovery, not a warning.
   try {
     await deps.admin?.forceGrantOrgAdmin(principalId, "break-glass");
   } catch (e) {
-    console.warn(`[break-glass] admin grant not created: ${String(e)}`);
+    audit(deps, {
+      principalId,
+      action: "break-glass.recover",
+      resource: principalId,
+      scopeLabel: orgScope(deps),
+      status: "partial",
+      detail: `password set but the org_admin grant failed, from ${ip}`,
+    });
+    console.error(`[break-glass] password set for ${principalId} but the admin grant failed: ${String(e)}`);
+    return sendJson(res, 500, {
+      error: "grant_failed",
+      message:
+        "the password was set but the org_admin grant could not be written — that account can sign in but cannot administer",
+    });
   }
   audit(deps, {
     principalId,

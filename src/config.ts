@@ -62,6 +62,13 @@ export interface Config {
   sessionTapeMode: "shadow" | "serve";
   adminGrants?: string;
   emailAuthPrincipals?: string[];
+  /**
+   * Whether this deployment stores password credentials at all. Off by
+   * default: with it unset core carries no credential table and the password
+   * and break-glass routes do not exist, so a deployment that signs people in
+   * by emailed link is byte-for-byte unchanged.
+   */
+  passwordSignIn: boolean;
   breakGlass?: BreakGlassConfig;
   rateLimitPerWindow: number;
   rateLimitWindowMs: number;
@@ -800,6 +807,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(modelProvider ? { modelProvider } : {}),
     providerBaseUrls,
     ...(env.ADMIN_GRANTS ? { adminGrants: env.ADMIN_GRANTS } : {}),
+    passwordSignIn: boolEnvStrict("QM_PASSWORD_SIGN_IN", env.QM_PASSWORD_SIGN_IN) ?? false,
     ...((): { breakGlass?: BreakGlassConfig } => {
       const breakGlass = readBreakGlassConfig(env);
       return breakGlass ? { breakGlass } : {};

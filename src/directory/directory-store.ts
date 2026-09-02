@@ -52,6 +52,12 @@ export interface DirectoryStore {
    */
   upsertMember(member: DirectoryMember): Promise<void>;
   removeMember(principalId: string): Promise<void>;
+  /**
+   * The members this deployment created itself. A directory sync must not
+   * treat them as people who disappeared from the upstream roster: they were
+   * never in it.
+   */
+  listLocal(): Promise<DirectoryMember[]>;
   replaceChannels(
     channels: DirectoryChannel[],
     channelMembers?: ChannelMembership[],
@@ -155,6 +161,9 @@ export function createDirectoryStore(): DirectoryStore {
       if (!member.principalId || member.type !== "internal") return;
       localMembers = [...localMembers.filter((m) => !samePerson(m.principalId, member.principalId)), member];
       mergeMembers();
+    },
+    async listLocal() {
+      return [...localMembers];
     },
     async removeMember(principalId) {
       localMembers = localMembers.filter((m) => !samePerson(m.principalId, principalId));

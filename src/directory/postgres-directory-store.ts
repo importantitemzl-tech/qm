@@ -307,6 +307,11 @@ export function createPostgresDirectoryStore(connectionString: string): Director
       );
     },
 
+    async listLocal() {
+      const rows = await q(`SELECT ${MEMBER_COLS} FROM directory_members WHERE org_id = $1 AND local = TRUE`, [orgId]);
+      return rows.map(memberRow);
+    },
+
     async removeMember(principalId) {
       await q("DELETE FROM directory_members WHERE org_id = $1 AND lower(principal_id) = lower($2)", [
         orgId,

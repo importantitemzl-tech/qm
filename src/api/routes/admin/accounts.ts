@@ -15,12 +15,12 @@ const MAX_DISPLAY_NAME = 200;
  * every write is audited. Nothing here returns a password or a hash.
  */
 
-function storeOr503(ctx: ApiCtx): NonNullable<ApiCtx["deps"]["passwordCredentials"]> | null {
+function storeOr404(ctx: ApiCtx): NonNullable<ApiCtx["deps"]["passwordCredentials"]> | null {
   const store = ctx.deps.passwordCredentials;
   if (!store) {
-    sendJson(ctx.res, 503, {
-      error: "not_configured",
-      message: "administrator-managed accounts need the Postgres-backed credential store; set DATABASE_URL",
+    sendJson(ctx.res, 404, {
+      error: "not_found",
+      message: "this deployment does not manage password accounts; set QM_PASSWORD_SIGN_IN to turn them on",
     });
     return null;
   }
@@ -32,7 +32,7 @@ export async function listAccounts(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
-  const store = storeOr503(ctx);
+  const store = storeOr404(ctx);
   if (!store) return;
   audit(deps, { principalId: actor.id, action: "accounts.read", resource: "accounts", scopeLabel: scope });
 
@@ -57,7 +57,7 @@ export async function createAccount(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
-  const store = storeOr503(ctx);
+  const store = storeOr404(ctx);
   if (!store) return;
   if (!deps.directory) return sendJson(res, 503, { error: "not_configured", message: "no directory is configured" });
 
@@ -98,7 +98,7 @@ export async function resetAccountPassword(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
-  const store = storeOr503(ctx);
+  const store = storeOr404(ctx);
   if (!store) return;
   const principalId = params.principalId!;
   const b = isObj(body) ? body : {};
@@ -123,7 +123,7 @@ export async function setAccountActive(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
-  const store = storeOr503(ctx);
+  const store = storeOr404(ctx);
   if (!store) return;
   const principalId = params.principalId!;
   const b = isObj(body) ? body : {};
@@ -152,7 +152,7 @@ export async function deleteAccount(ctx: ApiCtx): Promise<void> {
   const scope = orgScope(deps);
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
-  const store = storeOr503(ctx);
+  const store = storeOr404(ctx);
   if (!store) return;
   const principalId = params.principalId!;
   if (samePerson(actor.id, principalId))
