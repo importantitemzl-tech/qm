@@ -11,6 +11,12 @@ import {
 import type { ServerDeps } from "./api/deps.ts";
 import { createIdentityService, type DeactivationRecord, type IdentityService } from "./identity/identity-service.ts";
 import {
+  createPasswordCredentialStore,
+  type PasswordCredential,
+  type PasswordCredentialStore,
+} from "./auth/password-credentials.ts";
+import type { BreakGlassConfig } from "./auth/break-glass.ts";
+import {
   createMemoryConfigStore,
   type ScopedConfigStore,
   type PersistedSoul,
@@ -372,6 +378,14 @@ export interface BuiltApp {
   credentialUsage: CredentialUsageSink;
   egressAudit: EgressAuditSink;
   identity: IdentityService;
+  /**
+   * The durable map behind `identity`. Exposed so a test can stand up a second
+   * IdentityService over the same records — which is what a second core
+   * replica is, and the only way to exercise cache staleness in one process.
+   */
+  identityStore: DurableMap<DeactivationRecord>;
+  passwordCredentials: PasswordCredentialStore | undefined;
+  breakGlass: BreakGlassConfig | undefined;
   keychain?: Keychain;
   serviceCreds: ServiceCredentialStore;
   deliveries: DeliveryStore;
@@ -451,10 +465,21 @@ export function buildApp(
       ...(config.openrouterApiKey ? { openrouter: config.openrouterApiKey } : {}),
     },
   });
-  const identity = createIdentityService(artifactMap<DeactivationRecord>("deactivated_principals"), {
+  const identityStore = artifactMap<DeactivationRecord>("deactivated_principals");
+  const identity = createIdentityService(identityStore, {
     directorySyncProtected: config.emailAuthPrincipals,
   });
   void identity.hydrate();
+  const passwordCredentials = config.passwordSignIn
+    ? createPasswordCredentialStore(artifactMap<PasswordCredential>("password_credentials"))
+    : undefined;
+  const breakGlass = config.passwordSignIn ? config.breakGlass : undefined;
+  if (config.breakGlass && !config.passwordSignIn)
+    console.warn("[break-glass] ignored: QM_PASSWORD_SIGN_IN is not on, so there is no credential to reset");
+  if (breakGlass)
+    console.warn(
+      `[break-glass] recovery is armed for ${breakGlass.principalId} — POST /v1/auth/break-glass can reset that account's password and admin grant`,
+    );
   const leaderLease: LeaderLease = pgArtifactMap
     ? createPostgresLeaderLease(pgArtifactMap.pool)
     : createNoopLeaderLease();
@@ -1691,6 +1716,9 @@ export function buildApp(
     credentialUsage,
     egressAudit,
     identity,
+    identityStore,
+    passwordCredentials,
+    breakGlass,
     workspace,
     memory,
     ...(keychain ? { keychain } : {}),
@@ -1784,6 +1812,8 @@ export function serverDeps(
     scheduler: built.scheduler,
     webhookReceiver: built.webhookReceiver,
     identity: built.identity,
+    ...(built.passwordCredentials ? { passwordCredentials: built.passwordCredentials } : {}),
+    ...(built.breakGlass ? { breakGlass: built.breakGlass } : {}),
     ...(built.keychain ? { keychain: built.keychain } : {}),
     serviceCreds: built.serviceCreds,
     deliveries: built.deliveries,
