@@ -18,6 +18,7 @@ import type {
   NewTapeRecord,
   ParticipantWindow,
   ScopeSessionStats,
+  ScreenSample,
   SessionOrigin,
   SessionOriginFilter,
   SessionPage,
@@ -38,6 +39,7 @@ import {
   stableOriginPattern,
   userMessagePreview,
 } from "./session-store.ts";
+import { SECURITY_SCREEN_STEP, screenPayloadFromEnvelope } from "../security/security-posture.ts";
 
 export const SESSION_ENTRIES_SEARCH_INDEX_SQL = `CREATE INDEX CONCURRENTLY IF NOT EXISTS session_entries_search_tsv
   ON session_entries USING GIN (search_tsv)
@@ -245,6 +247,8 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
       )`,
     `CREATE INDEX IF NOT EXISTS session_llm_requests_by_session
         ON session_llm_requests(session_id, created_at, step)`,
+    `CREATE INDEX IF NOT EXISTS session_llm_requests_screens
+        ON session_llm_requests(created_at DESC) WHERE step = -1`,
     `ALTER TABLE session_llm_requests ADD COLUMN IF NOT EXISTS ttft_ms INT`,
     `ALTER TABLE session_llm_requests ADD COLUMN IF NOT EXISTS duration_ms INT`,
     `ALTER TABLE session_llm_requests ADD COLUMN IF NOT EXISTS step_gap_ms INT`,
@@ -544,14 +548,14 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
       return rows.map(rowToEntry);
     },
 
-    async recordLlmRequest(sessionId, rec: NewLlmRequest): Promise<LlmRequestRecord> {
+    async recordLlmRequest(sessionId, rec: NewLlmRequest, signal?: AbortSignal): Promise<LlmRequestRecord> {
       const envelope = promptEnvelopeBody(rec.promptEnvelope);
       if (envelope) {
-        await q("INSERT INTO llm_prompt_envelopes(hash, body, created_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING", [
-          envelope.hash,
-          envelope.body,
-          now(),
-        ]);
+        await q(
+          "INSERT INTO llm_prompt_envelopes(hash, body, created_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+          [envelope.hash, envelope.body, now()],
+          { signal },
+        );
       }
       const full: LlmRequestRecord = {
         id: randomUUID(),
@@ -593,6 +597,7 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
           full.transport ? JSON.stringify(full.transport) : null,
           full.gapPhases ? JSON.stringify(full.gapPhases) : null,
         ],
+        { signal },
       );
       return full;
     },
@@ -622,6 +627,32 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
         args,
       );
       return rows.map(rowToLlmRequest);
+    },
+
+    async listScreenSamples(limit): Promise<ScreenSample[]> {
+      const rows = await q(
+        `SELECT r.id, r.session_id, r.scope_label, r.created_at, r.model, e.body AS prompt_body
+           FROM session_llm_requests r JOIN llm_prompt_envelopes e ON e.hash = r.prompt_hash
+          WHERE r.step = $1
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT $2`,
+        [SECURITY_SCREEN_STEP, Math.max(0, Math.trunc(limit))],
+      );
+      return rows.flatMap((r) => {
+        const payload = screenPayloadFromEnvelope(JSON.parse(r.prompt_body as string));
+        return payload
+          ? [
+              {
+                id: r.id as string,
+                sessionId: r.session_id as string,
+                scopeLabel: r.scope_label as ScopeId,
+                createdAt: Number(r.created_at),
+                model: r.model as string,
+                payload,
+              },
+            ]
+          : [];
+      });
     },
 
     async addParticipant(sessionId, principalId, title, opts): Promise<void> {

@@ -77,7 +77,11 @@ import {
 import { ELIDED_IMAGE_TEXT, planTapeSeed } from "./tape-fold.ts";
 import { compactTranscript, deterministicCompactSummary, estimateHistoryTokens } from "./context-compaction.ts";
 import { countTokens } from "../util/tokens.ts";
-import { parseSecurityScreenVerdict, SECURITY_SCREEN_SYSTEM_PROMPT } from "../security/security-posture.ts";
+import {
+  parseSecurityScreenVerdict,
+  SECURITY_SCREEN_STEP,
+  SECURITY_SCREEN_SYSTEM_PROMPT,
+} from "../security/security-posture.ts";
 import { errMessage } from "../util/errors.ts";
 import { createGrindMeter, meterGrindCall } from "./grind.ts";
 import { enforceGoal, goalSteeringNote, meterGoalCall, type GoalRecord } from "./goal.ts";
@@ -1285,6 +1289,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     tapeMode?: "shadow" | "serve",
     tapeFold?: unknown[],
     tape?: HarnessTurnInput["tape"],
+    turnProviderKeys?: ProviderKeys,
   ): Promise<{ entry: TurnSession; compileMs: number; tapeWriteFailed: boolean }> {
     const compileStart = Date.now();
     const cacheBoundary =
@@ -1324,7 +1329,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     const composedPrompt = systemPrompt + (seedPlan === "preamble" ? replayPreamble(history) : "");
 
     const model = getRequiredModel(resolveModelId(turnScope));
-    const modelRuntime = await buildModelRuntime(await resolveProviderKeys());
+    const modelRuntime = await buildModelRuntime(turnProviderKeys ?? (await resolveProviderKeys()));
     const ref: ToolContextRef = { current: null };
     const { resourceLoader, cwd, agentDir } = await createIsolatedResources(tempDirPrefix, composedPrompt);
     const compileMs = Date.now() - compileStart;
@@ -1503,6 +1508,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           turn.tapeMode,
           turn.tapeFold,
           turn.tape,
+          turn.providerKeys,
         );
         try {
           const turnWallClockMs = turn.turnWallClockMs ?? defaultTurnWallClockMs;
@@ -2087,26 +2093,33 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         return oneShot("pi-judge", model, providerKeys, systemPrompt, prompt);
       },
 
-      async screenSecurity({ payload, signal, recordModelCall, recordLlmRequest }) {
+      async screenSecurity({
+        payload,
+        modelId: configuredScreenModel,
+        systemPrompt = SECURITY_SCREEN_SYSTEM_PROMPT,
+        signal,
+        recordModelCall,
+        recordLlmRequest,
+      }) {
         try {
-          const modelId = detectModelId();
+          const modelId = configuredScreenModel ?? detectModelId();
           const model = getRequiredModel(modelId);
           const providerKeys = await resolveProviderKeys();
           if (!keyForModel(providerKeys, model)) return undefined;
           recordModelCall({
             model: modelId,
-            inputTokens: countTokens(SECURITY_SCREEN_SYSTEM_PROMPT) + countTokens(payload),
+            inputTokens: countTokens(systemPrompt) + countTokens(payload),
             entryCount: 1,
           });
           await recordLlmRequest?.({
             turnSeq: null,
-            step: -1,
+            step: SECURITY_SCREEN_STEP,
             model: modelId,
-            promptEnvelope: { system: SECURITY_SCREEN_SYSTEM_PROMPT, messages: [{ role: "user", content: payload }] },
+            promptEnvelope: { system: systemPrompt, messages: [{ role: "user", content: payload }] },
             truncated: false,
           });
           return parseSecurityScreenVerdict(
-            await oneShot("pi-security-screen", model, providerKeys, SECURITY_SCREEN_SYSTEM_PROMPT, payload, {
+            await oneShot("pi-security-screen", model, providerKeys, systemPrompt, payload, {
               signal,
             }),
           );

@@ -133,7 +133,10 @@ import { randomUUID } from "node:crypto";
 import { LRUCache } from "lru-cache";
 import type { SkillResolution, GrantedSkillRef } from "../skills/skill-store.ts";
 import type { Orchestrator, OrchestratorDeps, OrchestratorInput } from "./orchestrator/types.ts";
-import { resolveModel } from "../model/pi-models.ts";
+import { resolveModel, CODEX_SUBSCRIPTION_PROVIDER } from "../model/pi-models.ts";
+import type { ProviderKeys } from "../harness/pi-harness.ts";
+import type { CodexTurnAuth } from "../harness/harness.ts";
+import { resolveIndividualAuthRouting } from "./individual-auth-routing.ts";
 import {
   MAX_AUTO_ATTACHMENT_SCREEN_BYTES,
   approvalGrantId,
@@ -347,8 +350,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         actor.id,
         scopeLabel,
         sessionId
-          ? async (rec) => {
-              await deps.sessions.recordLlmRequest(sessionId, { ...rec, scopeLabel });
+          ? async (rec, signal) => {
+              await deps.sessions.recordLlmRequest(sessionId, { ...rec, scopeLabel }, signal);
             }
           : undefined,
         { hook: "user_input", surface: "steer", origin: "ambient" },
@@ -526,13 +529,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         );
       const screenSession: { id?: string } = {};
       const pendingScreenRequests: HarnessLlmRequestRecord[] = [];
-      const recordScreenRequest = async (rec: HarnessLlmRequestRecord): Promise<void> => {
+      const recordScreenRequest = async (rec: HarnessLlmRequestRecord, signal?: AbortSignal): Promise<void> => {
         if (!screenSession.id) {
           pendingScreenRequests.push(rec);
           return;
         }
         try {
-          await deps.sessions.recordLlmRequest(screenSession.id, { ...rec, scopeLabel: scopeId });
+          await deps.sessions.recordLlmRequest(screenSession.id, { ...rec, scopeLabel: scopeId }, signal);
         } catch (err) {
           console.error("[orchestrator] failed to persist security screen request snapshot:", errMessage(err));
         }
@@ -714,7 +717,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         try {
           await withManagedRosterVersion(async () => {
             await reconcileSessionParticipants(session.id);
-            await Promise.all(pendingScreenRequests.splice(0).map(recordScreenRequest));
+            await Promise.all(pendingScreenRequests.splice(0).map((rec) => recordScreenRequest(rec)));
             for (const overheard of screenedOverheard) {
               const imported = await deps.sessions.append(lease, {
                 type: "user",
@@ -829,7 +832,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       let recallMs = 0;
       for (const recallScope of recallScopes) {
         const recallStart = Date.now();
-        const body = (await deps.memory.recall(recallScope)).trim();
+        const body = (
+          await deps.memory.recall(recallScope, {
+            query: input.text,
+            actorId: actor.id,
+            conversationScopeId: scopeId,
+            maxChars: 6_000,
+            ...(automatedTurn ? { autonomous: true } : {}),
+          })
+        ).trim();
         recallMs += Date.now() - recallStart;
         if (!body) continue;
         recalledSections.push(recallScopes.length === 1 ? body : `### ${recallScope}\n${body}`);
@@ -1409,7 +1420,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       try {
         await withManagedRosterVersion(async () => {
           await reconcileSessionParticipants(session.id);
-          await Promise.all(pendingScreenRequests.splice(0).map(recordScreenRequest));
+          await Promise.all(pendingScreenRequests.splice(0).map((rec) => recordScreenRequest(rec)));
           return true;
         });
         if (input.approval) {
@@ -2320,6 +2331,85 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         const wantsOrgFastMode =
           typeof input.fastMode !== "boolean" && humanTurn && (await deps.config?.getInteractiveFastModeDurable());
         const effectiveFastMode = resolveTurnFastMode(input.fastMode, humanTurn, wantsOrgFastMode === true);
+        let userProviderKeys: ProviderKeys | undefined;
+        let userModelOverride: string | undefined;
+        let userHarnessOverride: string | undefined;
+        let claudeOauthToken: string | undefined;
+        let codexTurnAuth: CodexTurnAuth | undefined;
+        const userCredStore = deps.userModelCredentials;
+        if (userCredStore && humanTurn && (await deps.config?.getIndividualModelAuthDurable())) {
+          const [anthCred, oaiCred] = await Promise.all([
+            userCredStore.get(actor.id, "anthropic"),
+            userCredStore.get(actor.id, "openai"),
+          ]);
+          // The org's harness choice decides how a ChatGPT subscription is
+          // served: pi orgs stay on pi (Codex provider inside pi-ai), others
+          // hop to the codex harness.
+          const orgRuntime = await deps.config?.getRuntimeSelectionDurable(resolution.orgScopeId);
+          const preferredHarness = input.harness ?? orgRuntime?.harnessId ?? deps.defaultHarness;
+          const routing = resolveIndividualAuthRouting(
+            anthCred ?? null,
+            oaiCred ?? null,
+            input.model,
+            preferredHarness,
+          );
+          if (routing?.kind === "apikey") {
+            userHarnessOverride = "pi";
+            userProviderKeys = { [routing.provider]: routing.apiKey };
+            userModelOverride = routing.model;
+          } else if (routing?.kind === "oauth" && routing.provider === "anthropic" && anthCred?.oauth) {
+            // Derived material only — the keychain refreshes centrally
+            // (single-flight, CAS) and the refresh token never leaves it.
+            const derived = await userCredStore.derivedOAuth(actor.id, "anthropic");
+            if (derived) {
+              claudeOauthToken = derived.accessToken;
+              userHarnessOverride = routing.harness;
+              userModelOverride = routing.model;
+            }
+          } else if (
+            routing?.kind === "oauth" &&
+            routing.provider === "openai" &&
+            routing.harness === "pi" &&
+            oaiCred?.oauth
+          ) {
+            // pi-on-ChatGPT: pi-ai's openai-codex provider takes the access
+            // token as its key (the account claim rides inside the JWT).
+            const derived = await userCredStore.derivedOAuth(actor.id, "openai");
+            if (derived) {
+              userProviderKeys = { [CODEX_SUBSCRIPTION_PROVIDER]: derived.accessToken };
+              userHarnessOverride = routing.harness;
+              userModelOverride = routing.model;
+            }
+          } else if (routing?.kind === "oauth" && routing.provider === "openai" && oaiCred?.oauth) {
+            const derived = await userCredStore.derivedOAuth(actor.id, "openai");
+            if (derived?.idToken) {
+              codexTurnAuth = {
+                accessToken: derived.accessToken,
+                idToken: derived.idToken,
+                ...(derived.accountId ? { accountId: derived.accountId } : {}),
+                ...(derived.expiresAt !== undefined ? { expiresAt: derived.expiresAt } : {}),
+              };
+              userHarnessOverride = routing.harness;
+              userModelOverride = routing.model;
+            }
+          }
+          if (!userHarnessOverride) {
+            throw new NonRetryableTurnError(
+              "This organization has each person chat on their own AI account, and yours isn't connected yet. Open the web app and connect Claude or ChatGPT from the AI account panel, then try again.",
+            );
+          }
+        }
+        const effectiveModel = userModelOverride ?? input.model;
+        const effectiveHarness = userHarnessOverride ?? input.harness;
+        if (userHarnessOverride) {
+          let authLabel = "api-key";
+          if (claudeOauthToken) authLabel = "claude-oauth";
+          else if (codexTurnAuth) authLabel = "codex-oauth";
+          else if (userProviderKeys?.[CODEX_SUBSCRIPTION_PROVIDER]) authLabel = "codex-oauth-pi";
+          console.log(
+            `[individual-auth] user=${actor.id} harness=${userHarnessOverride} model=${effectiveModel} auth=${authLabel}`,
+          );
+        }
         const runHarnessTurn = (
           harnessInput: string,
           extras: {
@@ -2344,6 +2434,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           }
           return deps.harness.turns.runTurn({
             session,
+            ...(userProviderKeys ? { providerKeys: userProviderKeys } : {}),
+            ...(claudeOauthToken ? { claudeOauthToken } : {}),
+            ...(userHarnessOverride ? { runtimePinned: true } : {}),
+            ...(codexTurnAuth ? { codexAuth: codexTurnAuth } : {}),
             ...(input.runId ? { runId: input.runId } : {}),
             ...(input.cancel ? { cancel: input.cancel } : {}),
             input: harnessInput,
@@ -2354,8 +2448,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             ...(extras.overheard?.length ? { overheard: extras.overheard } : {}),
             ...(extras.attachments?.length ? { attachments: extras.attachments } : {}),
             ...(extras.images?.length ? { images: extras.images } : {}),
-            ...(input.harness ? { harness: input.harness } : {}),
-            ...(input.model ? { model: input.model } : {}),
+            ...(effectiveHarness ? { harness: effectiveHarness } : {}),
+            ...(effectiveModel ? { model: effectiveModel } : {}),
             ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
             ...(typeof effectiveFastMode === "boolean" ? { fastMode: effectiveFastMode } : {}),
             ...(strictReadOnly ? { readOnly: true } : {}),
@@ -2583,9 +2677,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               deps.modelGateway.recordCall({ at: Date.now(), scopeLabel: scopeId, ...rec });
               void deps.budget?.record(actor.id, estimateCostUsd(rec.inputTokens));
             },
-            recordLlmRequest: async (rec) => {
+            recordLlmRequest: async (rec, signal) => {
               try {
-                await deps.sessions.recordLlmRequest(session.id, { ...rec, scopeLabel: scopeId });
+                await deps.sessions.recordLlmRequest(session.id, { ...rec, scopeLabel: scopeId }, signal);
               } catch (err) {
                 console.error("[orchestrator] failed to persist LLM request snapshot:", errMessage(err));
               }
@@ -2917,6 +3011,8 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 actorId: actor.id,
                 ...(automatedTurn ? { autonomous: true } : {}),
                 ...(conversationLabel ? { conversationLabel } : {}),
+                sessionId: session.id,
+                idempotencyKey: input.runId ?? `${session.id}:${spine.turnUserEntrySeq ?? "turn"}`,
               });
             } catch (e) {
               deps.errors?.record({
