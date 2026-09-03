@@ -188,3 +188,28 @@ test("the password change route is absent in email-link mode", async () => {
     await h.close();
   }
 });
+
+// The portal proxies a fixed list of broker paths and nothing else, so a broker
+// page the portal does not know about is unreachable from a browser. That is
+// how the change step shipped broken. This pins the path the portal was told
+// about, so moving it fails here rather than in a deployment.
+test("the change-password form posts to /password, which the portal's proxy list names", async () => {
+  const h = await passwordHarness(
+    fakePasswords({ "ops@example.com": { password: "issued-by-admin", mustChange: true } }),
+  );
+  try {
+    const { request } = await openForm(h);
+    const res = await fetch(`${h.base}/authorize`, form({ request, email: "ops@example.com", password: "issued-by-admin" }));
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    const action = /<form[^>]*action="([^"]*)"/.exec(html)?.[1];
+    assert.ok(action, "the change page must render a form");
+    assert.equal(
+      new URL(action, "http://broker.invalid").pathname.replace(/^.*(?=\/password$)/, ""),
+      "/password",
+      "plugins/portal BROKER_PUBLIC_ROUTES must carry whatever this is",
+    );
+  } finally {
+    await h.close();
+  }
+});
