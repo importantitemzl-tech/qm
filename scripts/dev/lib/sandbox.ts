@@ -7,7 +7,7 @@ import { ensureDockerDaemon } from "./postgres.ts";
 import { bestEffortValue, sleep } from "./util.ts";
 
 export interface SandboxResolution {
-  backend: "local" | "sprites" | "smolmachines";
+  backend: "local" | "sprites" | "smolmachines" | "porter";
   env: Record<string, string>;
   detail: string;
   publicApiUrl: string | null;
@@ -24,7 +24,7 @@ async function localImagePresent(image: string): Promise<boolean> {
 
 export async function resolveSandbox(opts: {
   worktree: string;
-  requested: "local" | "sprites" | "smolmachines" | "auto";
+  requested: "local" | "sprites" | "smolmachines" | "porter" | "auto";
   corePort: number;
   lock: string;
   baseEnv: Record<string, string>;
@@ -95,6 +95,47 @@ export async function resolveSandbox(opts: {
       env: smolEnv,
       detail: "smolmachines (api.smolmachines.com)",
       publicApiUrl: smolApiUrl,
+      warnings,
+    };
+  }
+
+  if (backend === "porter") {
+    const porterToken = opts.baseEnv.PORTER_DEPLOY_API_TOKEN;
+    const projectId = opts.baseEnv.PORTER_DEPLOY_PROJECT_ID;
+    const clusterId = opts.baseEnv.PORTER_DEPLOY_CLUSTER_ID;
+    if (!porterToken || !projectId || !clusterId)
+      throw new Error(
+        "--sandbox porter requires PORTER_DEPLOY_API_TOKEN, PORTER_DEPLOY_PROJECT_ID, and PORTER_DEPLOY_CLUSTER_ID in the environment (create an API token in the Porter dashboard)",
+      );
+    let porterApiUrl = opts.baseEnv.PUBLIC_API_URL || null;
+    if (!porterApiUrl) {
+      porterApiUrl = await startQuickTunnel(opts.corePort, opts.lock, opts.log);
+      if (!porterApiUrl)
+        warnings.push(
+          "cloudflared tunnel didn't come up -- agent self-API (crons/sends) won't be reachable from the sandbox",
+        );
+    }
+    const env: Record<string, string> = {
+      SANDBOX_BACKEND: "porter",
+      PORTER_DEPLOY_API_TOKEN: porterToken,
+      PORTER_DEPLOY_PROJECT_ID: projectId,
+      PORTER_DEPLOY_CLUSTER_ID: clusterId,
+      PORTER_SANDBOX_NAME_PREFIX: opts.baseEnv.PORTER_SANDBOX_NAME_PREFIX || "qmdev",
+    };
+    if (opts.baseEnv.PORTER_DEPLOY_URL) env.PORTER_DEPLOY_URL = opts.baseEnv.PORTER_DEPLOY_URL;
+    if (opts.baseEnv.PORTER_SANDBOX_IMAGE) env.PORTER_SANDBOX_IMAGE = opts.baseEnv.PORTER_SANDBOX_IMAGE;
+    if (opts.baseEnv.PORTER_SANDBOX_EGRESS_PROXY_URL)
+      env.PORTER_SANDBOX_EGRESS_PROXY_URL = opts.baseEnv.PORTER_SANDBOX_EGRESS_PROXY_URL;
+    else
+      warnings.push(
+        "PORTER_SANDBOX_EGRESS_PROXY_URL unset -- porter sandbox runs with NO egress enforcement; set it to QA the forced-proxy path",
+      );
+    if (porterApiUrl) env.PUBLIC_API_URL = porterApiUrl;
+    return {
+      backend: "porter",
+      env,
+      detail: `Porter (project ${projectId}, cluster ${clusterId})`,
+      publicApiUrl: porterApiUrl,
       warnings,
     };
   }

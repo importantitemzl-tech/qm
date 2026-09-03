@@ -18,7 +18,12 @@ import {
 } from "../../../model/model-catalog.ts";
 import { sendJson } from "../../http.ts";
 import { adminActorFrom, audit, authorizeAdmin, orgScope } from "../shared.ts";
-import { ADMIN_RESOURCES, ADMIN_RESOURCE_BY_ID, adminResourceManifest } from "../admin-resources.ts";
+import {
+  ADMIN_RESOURCES,
+  ADMIN_RESOURCE_BY_ID,
+  adminResourceManifest,
+  defaultAutoFlaggerConfig,
+} from "../admin-resources.ts";
 import { type ApiCtx } from "../route.ts";
 import {
   composePolicy,
@@ -331,6 +336,7 @@ export async function getScopeConfig(ctx: ApiCtx): Promise<void> {
     harnessDefault: deps.harnessId ?? "pi",
     harnessOptions: HARNESS_IDS.filter((id) => id !== "mock"),
     modelsByHarness: Object.fromEntries(HARNESS_IDS.map((id) => [id, modelsFor(id)])),
+    autoFlaggerDefault: defaultAutoFlaggerConfig(deps),
     browseModelOptions: SELECTABLE_BASE_MODELS.filter((m) =>
       modelServiceable(m.id, providersFor(deps.harnessId ?? "pi")),
     ),

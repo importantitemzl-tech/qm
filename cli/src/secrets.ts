@@ -126,6 +126,23 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     generate: "fly tokens create org -o <fly-org> -x 8760h",
   },
   {
+    name: "PORTER_DEPLOY_API_TOKEN",
+    service: "core",
+    required: {
+      when: {
+        kind: "any",
+        conditions: [
+          { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "porter" },
+          { kind: "env-equals", service: "core", name: "DEPLOY_PROVIDER", value: "porter" },
+        ],
+      },
+    },
+    description:
+      "Admin-role Porter API token for the sandbox backend and the per-deployment app publisher — Developer-role tokens fail mid-deployment with PERMISSION_DENIED.",
+    generate:
+      "create an Admin-role API token in the Porter dashboard (https://dashboard.porter.run → Settings → API tokens)",
+  },
+  {
     name: "SPRITES_TOKEN",
     service: "core",
     required: { when: { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "sprites" } },
@@ -156,8 +173,16 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
   {
     name: "AWS_DEPLOY_GATE_SECRET",
     service: "core",
-    required: { when: { kind: "env-present", service: "core", name: "AWS_DEPLOY_APPS_DOMAIN" } },
-    description: "HMAC key protecting public AWS deployment-app URLs.",
+    required: {
+      when: {
+        kind: "any",
+        conditions: [
+          { kind: "env-present", service: "core", name: "AWS_DEPLOY_APPS_DOMAIN" },
+          { kind: "env-present", service: "core", name: "DEPLOY_APPS_DOMAIN" },
+        ],
+      },
+    },
+    description: "HMAC key protecting public deployment-app URLs on the apps domain.",
     generate: MINT_LOCALLY,
   },
   {
