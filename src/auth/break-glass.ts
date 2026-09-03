@@ -24,7 +24,7 @@ export interface BreakGlassConfig {
   secretHash: Buffer;
 }
 
-const MIN_SECRET_LENGTH = 32;
+export const MIN_SECRET_LENGTH = 32;
 
 export function readBreakGlassConfig(env: NodeJS.ProcessEnv): BreakGlassConfig | undefined {
   const principalId = env.QM_BREAK_GLASS_PRINCIPAL?.trim();

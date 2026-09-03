@@ -121,6 +121,12 @@ the administrator handling the incident. Two boot-time variables arm a way back:
 | `QM_BREAK_GLASS_PRINCIPAL` | the one principal that may be recovered             |
 | `QM_BREAK_GLASS_SECRET`    | at least 32 characters; the credential for the call |
 
+Both are core's, not the broker's. The deployment CLI collects
+`QM_BREAK_GLASS_SECRET` as a secret whenever `env.core.QM_BREAK_GLASS_PRINCIPAL`
+names a principal, and core refuses to boot without a usable one — otherwise a
+deployment that asked for the route would come up with it silently disarmed and
+find out during the incident it was built for.
+
 With both set, `POST /v1/auth/break-glass` on core — source-authenticated like
 every other core route, and additionally gated by that secret — sets that
 principal's password and restores their `org_admin` grant. It mints no session
