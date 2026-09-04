@@ -148,6 +148,11 @@ test("a deactivated account cannot sign in even with the right password", async 
     assert.equal((await verify(s.base, "ops@example.com", "issued-by-admin")).status, 200);
     assert.equal(((await (await verify(s.base, "ops@example.com", "issued-by-admin")).json()) as any).ok, true);
 
+    // An absent or non-boolean `active` must not read as "deactivate".
+    for (const bad of [{}, { active: "false" }, { active: 0 }, { enabled: false }]) {
+      const r = await admin(s.base, "PUT", "/v1/admin/accounts/ops@example.com/active", bad);
+      assert.equal(r.status, 400, `body ${JSON.stringify(bad)} must be refused, not read as deactivate`);
+    }
     const off = await admin(s.base, "PUT", "/v1/admin/accounts/ops@example.com/active", { active: false });
     assert.equal(off.status, 200);
     assert.deepEqual(await (await verify(s.base, "ops@example.com", "issued-by-admin")).json(), { ok: false });

@@ -127,7 +127,16 @@ export async function setAccountActive(ctx: ApiCtx): Promise<void> {
   if (!store) return;
   const principalId = params.principalId!;
   const b = isObj(body) ? body : {};
-  const active = b.active === true;
+  // An absent or non-boolean `active` is refused rather than read as false: the
+  // destructive reading must not be what ambiguous input defaults to, even on
+  // an admin-gated audited route.
+  if (typeof b.active !== "boolean") {
+    return sendJson(res, 400, {
+      error: "bad_request",
+      message: "active must be true or false",
+    });
+  }
+  const active = b.active;
   if (!active && samePerson(actor.id, principalId)) {
     return sendJson(res, 400, {
       error: "bad_request",
