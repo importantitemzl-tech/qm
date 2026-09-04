@@ -67,6 +67,9 @@ test("fly derives the portal's whole OIDC block from the broker, over the privat
   assert.match(portal, /OIDC_ALLOWED_EMAIL_DOMAIN = "example\.com"/);
   assert.doesNotMatch(portal, /accounts\.google\.com|slack\.com/, "the template's external-IdP defaults are replaced");
 
+  const core = derivedTomlFor(brokerConfig(), "core", repoRoot);
+  assert.match(core, /AUTH_ALLOWED_EMAIL_DOMAIN = "example\.com"/, "core refuses in-domain external invites");
+
   const auth = derivedTomlFor(brokerConfig(), "auth", repoRoot);
   assert.equal(auth, readFileSync(join(repoRoot, "deploy", "auth", "fly.toml"), "utf8"));
   assert.match(auth, /AUTH_ISSUER = "https:\/\/agent\.example\.com\/idp"/);
@@ -125,6 +128,7 @@ test("docker and AWS wire the broker with parity", () => {
   assert.equal(awsPortal.AUTH_BROKER_UPSTREAM, "http://auth.acme.internal:8080");
   assert.equal(awsPortal.OIDC_JWKS_URI, "http://auth.acme.internal:8080/.well-known/jwks.json");
   assert.equal(awsPortal.OIDC_ALLOWED_EMAIL_DOMAIN, "example.com");
+  assert.equal(serviceEnvironment(aws, "core").AUTH_ALLOWED_EMAIL_DOMAIN, "example.com");
   assert.equal(
     awsPortal.PORTAL_XFF_TRUSTED_HOPS,
     "1",
@@ -166,6 +170,12 @@ test("the broker's generated secrets reach both sides under the right names", ()
   assert.ok(!names.has("AUTH_ALLOWED_EMAILS"), "a configured domain removes the per-address allowlist requirement");
   assert.ok(names.has("RESEND_API_KEY"));
   assert.ok(!names.has("SMTP_HOST"), "only the configured transport's credentials are collected");
+  for (const name of ["RESEND_API_KEY", "AUTH_EMAIL_FROM"]) {
+    const shared = secrets.find((secret) => secret.name === name)!;
+    assert.ok(shared.required);
+    assert.deepEqual(runtimeSecretNames("auth", shared), [name]);
+    assert.deepEqual(runtimeSecretNames("core", shared), [name], `core emails external-user invitations with ${name}`);
+  }
   assert.ok(secretsForService(config, "auth").some((secret) => secret.name === "CORE_SIGNING_SECRET"));
 });
 
@@ -178,7 +188,10 @@ test("without a configured domain the allowlist becomes a required secret on bot
   assert.deepEqual(runtimeSecretNames("core", allowed), ["AUTH_ALLOWED_EMAILS"]);
   const names = new Set(computedSecrets(config).map((secret) => secret.name));
   for (const name of ["SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD"]) assert.ok(names.has(name), name);
-  assert.ok(!names.has("RESEND_API_KEY"));
+  const resend = computedSecrets(config).find((secret) => secret.name === "RESEND_API_KEY")!;
+  assert.equal(resend.required, false, "the unselected transport's key stays optional");
+  assert.deepEqual(runtimeSecretNames("auth", resend), []);
+  assert.deepEqual(runtimeSecretNames("core", resend), ["RESEND_API_KEY"], "core alone keeps it for invitations");
 });
 
 test("the config refuses a broker without a portal, a bad transport, and hand-set derived env", () => {
@@ -265,9 +278,24 @@ const fs=require("node:fs"); fs.appendFileSync(${JSON.stringify(log)}, process.a
 
 test("password mode makes the mail transport and its credentials optional", () => {
   const config = configWith(configText({ env: `{ "auth": { "AUTH_CREDENTIAL_TRANSPORT": "password" } }` }));
+  const MAIL = ["SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USERNAME", "SMTP_PASSWORD", "RESEND_API_KEY", "AUTH_EMAIL_FROM"];
   const names = new Set(computedSecrets(config).map((secret) => secret.name));
-  for (const name of ["SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "RESEND_API_KEY", "AUTH_EMAIL_FROM"]) {
-    assert.ok(!names.has(name), `${name} is not applicable when nothing is mailed`);
+  const brokerNames = new Set(secretsForService(config, "auth").map((secret) => secret.name));
+  for (const name of MAIL) {
+    assert.ok(!brokerNames.has(name), `${name} does not reach the broker when nothing is mailed`);
+  }
+  // Some of these names survive as core's optional senders for external-user
+  // invitations, which is a different feature from the sign-in transport. What
+  // password mode guarantees is that the broker gets none of them and that no
+  // mail secret anywhere is required.
+  for (const secret of computedSecrets(config)) {
+    if (!MAIL.includes(secret.name)) continue;
+    assert.deepEqual(
+      secret.services,
+      ["core"],
+      `${secret.name} should only survive as core's invitation sender`,
+    );
+    assert.equal(secret.required, false, `${secret.name} must not be required when nothing is mailed`);
   }
   assert.ok(
     !names.has("AUTH_ALLOWED_EMAILS"),

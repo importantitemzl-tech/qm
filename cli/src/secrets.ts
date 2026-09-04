@@ -158,6 +158,21 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     generate: "create an API key in the smolmachines console (https://smolmachines.com/console)",
   },
   {
+    name: "AGENT37_API_KEY",
+    service: "core",
+    required: {
+      when: {
+        kind: "any",
+        conditions: [
+          { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "agent37" },
+          { kind: "env-equals", service: "core", name: "SANDBOX_SECONDARY_BACKEND", value: "agent37" },
+        ],
+      },
+    },
+    description: "Agent37 API key for the agent-computer substrate.",
+    generate: "mint a key in the Agent37 dashboard (https://agent37.com/dashboard/cloud/api-keys)",
+  },
+  {
     name: "DATABASE_URL",
     service: "core",
     required: { when: { kind: "target", target: "aws" } },
@@ -409,13 +424,27 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     service: "auth",
     // Nothing is mailed in password mode, so there is no sender to verify.
     required: { when: { kind: "not", condition: { kind: "env-equals", service: "auth", name: "AUTH_CREDENTIAL_TRANSPORT", value: "password" } } },
-    description: 'Verified sender for sign-in links, e.g. "Acme <no-reply@acme.com>".',
+    description: 'Verified sender for sign-in links and external-user invitations, e.g. "Acme <no-reply@acme.com>".',
+  },
+  {
+    name: "AUTH_EMAIL_FROM",
+    service: "core",
+    required: false,
+    description:
+      "Sender for external-user invitations sent from the admin Users tab or by chatting with QM; the same verified sender the sign-in broker uses.",
   },
   {
     name: "RESEND_API_KEY",
     service: "auth",
     required: { when: { kind: "env-equals", service: "auth", name: "AUTH_EMAIL_TRANSPORT", value: "resend" } },
-    description: "Resend API key used to deliver sign-in links.",
+    description: "Resend API key used to deliver sign-in links and external-user invitations.",
+  },
+  {
+    name: "RESEND_API_KEY",
+    service: "core",
+    required: false,
+    description:
+      "Lets core email invitations to external users, added from the admin Users tab or by chatting with QM, through Resend.",
   },
   {
     name: "SMTP_HOST",
@@ -464,8 +493,12 @@ function conditionMatches(config: QmConfig, condition: SecretCondition): boolean
   if (condition.kind === "env-all-absent") {
     return condition.names.every((name) => !config.env[condition.service]?.[name]?.trim());
   }
+  const configuredSandboxBackend =
+    condition.service === "core" && condition.name === "SANDBOX_BACKEND" ? config.sandbox?.backend : undefined;
   const value = (
-    config.env[condition.service]?.[condition.name] ?? targetEnvDefault(config, condition.service, condition.name)
+    config.env[condition.service]?.[condition.name] ??
+    configuredSandboxBackend ??
+    targetEnvDefault(config, condition.service, condition.name)
   )?.trim();
   if (condition.kind === "env-absent") return !value;
   if (condition.kind === "env-present") return Boolean(value);

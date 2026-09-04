@@ -7,12 +7,22 @@ AWS, GCP, or Azure account. qm can use it two ways, independently:
   home volume.
 - `DEPLOY_PROVIDER=porter` — apps the agent publishes run on the same cluster.
 
-Both need a Porter API token and the project and cluster that own the sandbox API:
+Both need a Porter API token and the project and cluster that own the sandbox API. The
+complete environment for a Porter-backed instance, verified against a live deployment:
 
 ```bash
+SANDBOX_BACKEND=porter
+DEPLOY_PROVIDER=porter
 PORTER_DEPLOY_API_TOKEN=<ADMIN-role api token from Settings -> API tokens>
 PORTER_DEPLOY_PROJECT_ID=<project id>
 PORTER_DEPLOY_CLUSTER_ID=<cluster id>
+PORTER_SANDBOX_IMAGE=ghcr.io/porter-dev/qm-sandbox:latest
+PORTER_DEPLOY_RUNNER_IMAGE=ghcr.io/porter-dev/qm-app-runner:latest
+# PORTER_DEPLOY_URL=            # only when the API host is not https://dashboard.porter.run
+# PORTER_DEPLOY_APPS_DOMAIN=    # optional; the cluster names apps itself (see below)
+# PORTER_DEPLOY_VISIBILITY=public  # public Porter ingress serves apps to ANYONE with the
+                                   # URL, bypassing qm's sign-in gate — leave private and
+                                   # use /d/<app>/ or DEPLOY_APPS_DOMAIN unless that is the intent
 ```
 
 ## Onboarding checklist
@@ -122,6 +132,10 @@ Nothing generates the inter-service wiring for you — `cli/src/services.ts` has
 | portal       | `PORTAL_PUBLIC_URL`, `PORTAL_SESSION_SECRET`, `WEB_UI_UPSTREAM`, `ADMIN_UPSTREAM`, `AUTH_BROKER_UPSTREAM`, `AUTH_BROKER_PREFIX=/idp`, the `OIDC_*` set from `brokerWiring` in `cli/src/services.ts` (including `OIDC_CLIENT_SECRET`), and `OIDC_ALLOWED_EMAILS` or `OIDC_ALLOWED_EMAIL_DOMAIN` — production refuses to boot without an allow-list |
 | admin        | `ADMIN_BASE_PATH=/admin`                                                                                                                                                                                                                                                                                                                          |
 | auth         | `AUTH_ISSUER=<portal>/idp`, `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET`, `AUTH_REDIRECT_URI=<portal>/auth/callback`, `AUTH_TOKEN_SECRET`, `AUTH_SIGNING_JWK` (a P-256 private JWK), `AUTH_EMAIL_FROM`, and `AUTH_EMAIL_TRANSPORT` with a `RESEND_API_KEY` or SMTP credentials — without a mail transport nobody can sign in                            |
+
+Core also reads `RESEND_API_KEY` and `AUTH_EMAIL_FROM` when they are set — optional there,
+they let admins email external-user invitations from the admin Users tab or by chatting
+with QM.
 
 `src/deployment/secret-schema.ts` is the authoritative list of what each service
 requires; when a boot refusal names a variable this table doesn't, that file is the place

@@ -123,9 +123,10 @@ the administrator handling the incident. Two boot-time variables arm a way back:
 
 Both are core's, not the broker's. The deployment CLI collects
 `QM_BREAK_GLASS_SECRET` as a secret whenever `env.core.QM_BREAK_GLASS_PRINCIPAL`
-names a principal, and core refuses to boot without a usable one — otherwise a
-deployment that asked for the route would come up with it silently disarmed and
-find out during the incident it was built for.
+names a principal, so a deployment cannot be brought up through the CLI with the
+route half-armed. Core itself still boots without a usable secret: it logs
+`[break-glass] disabled: ...` and omits the route, so a successful boot is not
+proof the path is armed — look for `[break-glass] recovery is armed for ...`.
 
 With both set, `POST /v1/auth/break-glass` on core — source-authenticated like
 every other core route, and additionally gated by that secret — sets that
@@ -133,6 +134,17 @@ principal's password and restores their `org_admin` grant. It mints no session
 and issues no token, and every call, refused or not, is audited under
 `break-glass.recover` / `break-glass.refused`. `npm run break-glass -- <principal>`
 signs the call from the host. Unset, the route answers `404`.
+## Invited external users
+
+An address an org admin has invited as an external user (Admin → Users, or by
+asking the agent) may sign in until its expiry even though it is on neither
+`AUTH_ALLOWED_EMAILS` nor `AUTH_ALLOWED_EMAIL_DOMAIN`. The env list is checked
+first and settles the answer on its own; only an address it does not cover is
+looked up in core over the signed core client (`GET
+/v1/auth/broker/email-allowed`), at every step — when the link is requested,
+when it is opened, and when the code is exchanged — so a revoked or expired
+invitation stops working at once. A lookup that fails or times out counts as not
+allowed. One of the two env variables is still required at boot.
 
 ## Email transport
 

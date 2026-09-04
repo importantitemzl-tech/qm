@@ -136,6 +136,7 @@ export async function startHarness(
     claims?: ClaimStore & { calls: string[][] };
     brandName?: () => string;
     passwords?: FakePasswords;
+    emailAllowed?: (email: string) => Promise<boolean>;
   } = {},
 ): Promise<Harness> {
   const cfg = readConfig(testEnv(options.env));
@@ -152,6 +153,7 @@ export async function startHarness(
     mailer,
     ...(cfg.credentialTransport === "password" ? { passwords } : {}),
     ...(options.brandName ? { brandName: options.brandName } : {}),
+    emailAllowed: options.emailAllowed ?? (async () => false),
     now: () => now.ms,
     onBackgroundTask: (task) => pending.push(task),
   });
