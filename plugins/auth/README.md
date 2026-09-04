@@ -132,8 +132,10 @@ With both set, `POST /v1/auth/break-glass` on core — source-authenticated like
 every other core route, and additionally gated by that secret — sets that
 principal's password and restores their `org_admin` grant. It mints no session
 and issues no token, and every call, refused or not, is audited under
-`break-glass.recover` / `break-glass.refused`. `npm run break-glass -- <principal>`
-signs the call from the host. Unset, the route answers `404`.
+`break-glass.recover` / `break-glass.refused`. `scripts/break-glass.ts <principal>` signs the call from the
+host, reading the password from a pipe when stdin is not a terminal and
+prompting without echo when it is. Passing it as an argument works and puts
+it in the shell history and the process table. Unset, the route answers `404`.
 ## Invited external users
 
 An address an org admin has invited as an external user (Admin → Users, or by

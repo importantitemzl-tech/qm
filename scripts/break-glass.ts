@@ -15,6 +15,7 @@
  * history and the process table.
  */
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import { signRequest } from "../src/auth/source-auth.ts";
 
 const [principalId, passwordArg] = process.argv.slice(2);
@@ -31,14 +32,46 @@ if (!principalId) die("usage: break-glass.ts <principal> [new password]");
 if (!signingSecret) die("CORE_SIGNING_SECRET is not set — core will refuse an unsigned request");
 if (!breakGlassSecret) die("QM_BREAK_GLASS_SECRET is not set — this deployment has no break-glass path armed");
 
-const password =
-  passwordArg ??
-  (await (async (): Promise<string> => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
-    const answer = await rl.question(`New password for ${principalId}: `);
+/**
+ * Read the password from a pipe. `rl.question()` never settles on a
+ * non-interactive stdin, so the prompt path below cannot be used here: it
+ * leaves the process on an unsettled top-level await and it dies without
+ * setting anything.
+ */
+async function readPiped(): Promise<string> {
+  process.stdin.setEncoding("utf8");
+  let raw = "";
+  for await (const chunk of process.stdin) raw += chunk;
+  return raw.replace(/\r?\n$/, "");
+}
+
+/**
+ * Prompt on a terminal without echoing. An operator reading the old prompt was
+ * told this kept the password out of the shell history, which was true, and
+ * was not told it put the password on the screen — and so into any terminal
+ * recording, screen share, or scrollback of the incident.
+ */
+async function promptHidden(): Promise<string> {
+  let hide = false;
+  const output = new Writable({
+    write(chunk, _enc, cb) {
+      if (!hide) process.stderr.write(chunk as Buffer);
+      cb();
+    },
+  });
+  const rl = createInterface({ input: process.stdin, output, terminal: true });
+  process.stderr.write(`New password for ${principalId}: `);
+  hide = true;
+  try {
+    return await rl.question("");
+  } finally {
     rl.close();
-    return answer;
-  })());
+    process.stderr.write("\n");
+  }
+}
+
+const password = passwordArg ?? (process.stdin.isTTY ? await promptHidden() : await readPiped());
+if (!password) die("no password was supplied on stdin");
 if (password.length < 8) die("a password must be at least 8 characters");
 
 const path = "/v1/auth/break-glass";
@@ -59,3 +92,8 @@ if (!res.ok) die(`core refused the call: HTTP ${res.status} ${text}`);
 console.error(
   `break-glass: ${principalId} can sign in again and holds org_admin. They must choose a new password at the next sign-in. The call is in the audit log.`,
 );
+// Exit rather than waiting for the event loop to drain. fetch's connection pool
+// can hold a keep-alive socket open after the response, and an operator in an
+// incident should not be left wondering whether a tool that has already done
+// its work is still doing something.
+process.exit(0);
