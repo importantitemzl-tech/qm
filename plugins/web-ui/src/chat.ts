@@ -519,20 +519,29 @@ export function createChatSurface(
     if (agent !== chatState.agent || !chatState.threadRef || agent.state.isStreaming) return;
     if (chatState.resolvingApprovals.size > 0) return;
     chatState.resolvingApprovals.add(decision.requestId);
+    let resolving = true;
+    const releaseSubmission = (): void => {
+      if (!resolving) return;
+      resolving = false;
+      if (agent === chatState.agent) chatState.resolvingApprovals.delete(decision.requestId);
+    };
     ctx.composer.state.error = "";
     drawActiveChat(agent);
     try {
       const threadRef = chatState.threadRef;
       const runId = await resolveApproval(decision);
       if (chatState.normalStreamFn && chatState.onWork)
-        await resumeRun(agent, threadRef, chatState.normalStreamFn, chatState.onWork, runId);
+        await resumeRun(agent, threadRef, chatState.normalStreamFn, chatState.onWork, runId, undefined, () => {
+          releaseSubmission();
+          drawActiveChat(agent);
+        });
     } catch (err) {
       if (agent === chatState.agent) {
         ctx.composer.state.error = err instanceof Error ? err.message : "Could not send the approval.";
         drawActiveChat(agent);
       }
     } finally {
-      chatState.resolvingApprovals.delete(decision.requestId);
+      releaseSubmission();
       if (agent === chatState.agent) {
         clearLiveWork();
         try {
@@ -676,6 +685,7 @@ export function createChatSurface(
     onWork: (work: WorkBlock) => void,
     runId: string,
     initialRun?: RunPoll,
+    onStarted?: () => void,
   ): Promise<boolean> {
     if (
       !agent.state.messages.length ||
@@ -703,7 +713,9 @@ export function createChatSurface(
       .join("\n\n");
     agent.streamFn = makeRunResumeStreamFn(runId, initialRun, onWork, runSlot, seedText);
     try {
-      await agent.continue();
+      const completion = agent.continue();
+      if (agent.state.isStreaming) onStarted?.();
+      await completion;
     } catch (err) {
       if (agent === chatState.agent)
         ctx.composer.state.error = err instanceof Error ? err.message : "Could not reconnect to the running task.";
@@ -888,7 +900,10 @@ export function createChatSurface(
                               requestAnimationFrame(() => {
                                 const scrollerNow = container?.querySelector<HTMLElement>(".chat-scroll");
                                 if (!scrollerNow) return;
+                                const prev = scrollerNow.style.scrollBehavior;
+                                scrollerNow.style.scrollBehavior = "auto";
                                 scrollerNow.scrollTop = priorTop + (scrollerNow.scrollHeight - priorHeight);
+                                scrollerNow.style.scrollBehavior = prev;
                               });
                             } catch {
                               btn.disabled = false;
@@ -918,6 +933,7 @@ export function createChatSurface(
     readonlyRedraw = draw;
     draw();
     container.replaceChildren(host);
+    if (!sameSession) scrollToBottom();
     readOnlyView = { id: s.id, threadRef: s.threadRef, session: s, anchorSeq };
     ctx.ensureDeliveryStream();
     consumeBackgroundPanelRequest();
@@ -2306,8 +2322,13 @@ export function createChatSurface(
     stickToBottom = s.scrollHeight - s.scrollTop - s.clientHeight <= 120;
   }
 
+  function scrollToBottom(): void {
+    stickToBottom = true;
+    scrollTranscript(true);
+  }
+
   function scrollTranscript(force = false): void {
-    const scroller = chatState.host?.querySelector<HTMLElement>(".chat-scroll");
+    const scroller = ctx.container()?.querySelector<HTMLElement>(".chat-scroll");
     if (!scroller) return;
     if (!force && !stickToBottom) return;
     requestAnimationFrame(() => {
@@ -2337,6 +2358,7 @@ export function createChatSurface(
     mountContinuable,
     mountReadOnly,
     mountLoadingPane,
+    scrollToBottom,
     drawActiveChat,
     setTranscriptWindow,
     requestBackgroundPanel,
